@@ -1,0 +1,6 @@
+[Unit]
+Description=Reconcile traffic workloads with the local weekday schedule
+
+[Service]
+Type=oneshot
+ExecStart=/opt/traffic-testbed/venv/bin/python /opt/traffic-testbed/schedule.py

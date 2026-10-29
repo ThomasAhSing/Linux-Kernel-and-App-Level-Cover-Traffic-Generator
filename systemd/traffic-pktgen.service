@@ -1,0 +1,27 @@
+[Unit]
+Description=Scheduled isolated kernel pktgen workload
+Requires=traffic-lab.service
+After=traffic-lab.service
+BindsTo=traffic-lab.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+NetworkNamespacePath=/run/netns/tt-source
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/sbin/modprobe pktgen
+ExecStart=/opt/traffic-testbed/venv/bin/python /opt/traffic-testbed/testbed.py run pktgen
+ExecStopPost=/opt/traffic-testbed/venv/bin/python /opt/traffic-testbed/testbed.py cleanup
+Restart=on-failure
+RestartSec=10
+KillMode=control-group
+TimeoutStopSec=15
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run/traffic-testbed
+ProtectHome=yes
+PrivateTmp=yes
+MemoryMax=128M
+CPUQuota=20%
+TasksMax=32
+# CPUQuota does not constrain kernel pktgen threads. Rate/count limits do.

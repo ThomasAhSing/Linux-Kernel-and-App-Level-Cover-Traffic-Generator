@@ -1,0 +1,20 @@
+[Unit]
+Description=Local testbed HTTP pages
+Requires=traffic-lab.service
+After=traffic-lab.service
+BindsTo=traffic-lab.service
+
+[Service]
+User=traffic-testbed
+Group=traffic-testbed
+NetworkNamespacePath=/run/netns/tt-sink
+ExecStart=/opt/traffic-testbed/venv/bin/python /opt/traffic-testbed/http_server.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+MemoryMax=64M
+CPUQuota=10%
+TasksMax=16

@@ -1,0 +1,28 @@
+[Unit]
+Description=Scheduled Playwright lab workload
+Requires=traffic-lab.service
+Wants=traffic-http.service
+After=traffic-lab.service traffic-http.service
+BindsTo=traffic-lab.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+User=traffic-testbed
+Group=traffic-testbed
+NetworkNamespacePath=/run/netns/tt-source
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/traffic-testbed/browsers
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/traffic-testbed/venv/bin/python /opt/traffic-testbed/testbed.py run browser
+Restart=on-failure
+RestartSec=10
+KillMode=control-group
+TimeoutStopSec=15
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run/traffic-testbed/browser.lock
+ProtectHome=yes
+PrivateTmp=yes
+MemoryMax=1G
+CPUQuota=50%
+TasksMax=256

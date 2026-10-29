@@ -1,0 +1,16 @@
+[Unit]
+Description=Weekday 08:00/17:00 traffic schedule and boot recovery
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 08:00:00
+OnCalendar=Mon..Fri *-*-* 17:00:00
+OnBootSec=15s
+OnClockChange=yes
+OnTimezoneChange=yes
+Persistent=yes
+AccuracySec=1us
+RandomizedDelaySec=0
+Unit=traffic-schedule.service
+
+[Install]
+WantedBy=timers.target

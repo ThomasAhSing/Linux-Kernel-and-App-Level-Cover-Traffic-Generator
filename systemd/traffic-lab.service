@@ -1,0 +1,11 @@
+[Unit]
+Description=Isolated traffic testbed network namespaces
+Before=traffic-browser.service traffic-pktgen.service traffic-http.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/traffic-testbed/lab.sh up
+ExecStop=/opt/traffic-testbed/lab.sh down
+TimeoutStartSec=30
+TimeoutStopSec=30
