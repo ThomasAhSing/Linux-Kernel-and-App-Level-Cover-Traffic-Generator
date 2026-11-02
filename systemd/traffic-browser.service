@@ -17,7 +17,8 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/traffic-testbed/venv/bin/python /opt/traffic-testbed/testbed.py run browser --network-mode external
 Restart=on-failure
 RestartSec=10
-KillMode=control-group
+# Let Python close Playwright/Chromium before systemd kills any leftovers.
+KillMode=mixed
 TimeoutStopSec=15
 NoNewPrivileges=yes
 ProtectSystem=strict

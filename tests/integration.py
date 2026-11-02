@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Opt-in live Ubuntu integration test; installed testbed required, ~25 seconds.
+"""Opt-in live Ubuntu integration test; installed testbed required, up to ~60 seconds.
 
 Uses separate transient manual units and temporary config. Never changes the
 installed config, clocks, or scheduling state. Refuses an active scheduler.
 """
-import grp
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -29,7 +29,48 @@ def wait_active(unit):
     raise AssertionError(f"{unit} never became active")
 
 
+def journal(invocation):
+    return subprocess.check_output(
+        ["journalctl", f"_SYSTEMD_INVOCATION_ID={invocation}", "--no-pager"], text=True)
+
+
+def wait_for_log(invocation, process, ready, description, timeout=40, clock=time.monotonic,
+                 pause=time.sleep, read_logs=journal):
+    """Active systemd state does not mean Chromium has finished starting."""
+    until = clock() + timeout
+    logs = ""
+    while clock() < until:
+        logs = read_logs(invocation)
+        result = process.poll()
+        if result is not None:
+            raise RuntimeError(f"Generator exited before {description} (status={result}).\n{logs}")
+        if ready(logs):
+            return logs
+        pause(0.25)
+    raise RuntimeError(f"Generator did not reach {description} within {timeout}s.\n{logs}")
+
+
+def wait_browser_ready(invocation, process, **kwargs):
+    return wait_for_log(invocation, process, lambda logs: "browser request success" in logs,
+                        "verified browser HTTP success", **kwargs)
+
+
+def wait_pktgen_ready(invocation, process, **kwargs):
+    return wait_for_log(invocation, process,
+                        lambda logs: "pktgen batch statistics" in logs and
+                        re.search(r"pkts-sofar:\s*[1-9][0-9]*", logs) is not None,
+                        "nonzero kernel packet count", **kwargs)
+
+
+def stop_if_loaded(unit):
+    result = subprocess.run(["systemctl", "show", "--value", "-p", "LoadState", unit],
+                            check=False, capture_output=True, text=True)
+    if result.stdout.strip() not in ("", "not-found"):
+        subprocess.run(["systemctl", "stop", unit], check=False)
+
+
 def main():
+    import grp
     assert os.geteuid() == 0, "sudo required"
     assert not active("traffic-schedule.timer"), "disable schedule before integration testing"
     for component in ("browser", "pktgen"):
@@ -66,17 +107,31 @@ def main():
                                         "tcp port 8000 or udp dst port 9000"])
             children.append(tcpdump)
             time.sleep(1)
+            assert tcpdump.poll() is None, "packet capture exited before workloads started"
+            processes = {}
+            invocations = {}
             for component in ("browser", "pktgen"):
-                proc = subprocess.Popen(["/opt/traffic-testbed/manual.sh", component, "20", str(config)])
+                proc = subprocess.Popen(["/opt/traffic-testbed/manual.sh", component, "60", str(config)])
+                processes[component] = proc
                 children.append(proc)
                 wait_active(f"traffic-manual-{component}.service")
-                if component == "browser":
-                    browser_invocation = subprocess.check_output([
-                        "systemctl", "show", "--value", "-p", "InvocationID", "traffic-manual-browser.service"
-                    ], text=True).strip()
-                    assert len(browser_invocation) == 32, "missing browser invocation id"
-            time.sleep(5)
+                invocation = subprocess.check_output([
+                    "systemctl", "show", "--value", "-p", "InvocationID", f"traffic-manual-{component}.service"
+                ], text=True).strip()
+                assert len(invocation) == 32, f"missing {component} invocation id"
+                invocations[component] = invocation
+            browser_invocation = invocations["browser"]
+            # Cold Chromium startup may take longer than five seconds on a VM.
+            # Verify genuine HTTP success before deliberately stopping it.
+            wait_browser_ready(browser_invocation, processes["browser"])
+            wait_pktgen_ready(invocations["pktgen"], processes["pktgen"], timeout=10)
+            assert active("traffic-manual-browser.service"), "browser stopped before the lifecycle check"
+            assert active("traffic-manual-pktgen.service"), "pktgen stopped before the lifecycle check"
             run("systemctl", "stop", "traffic-manual-browser.service")
+            browser_result = processes["browser"].wait(timeout=20)
+            if browser_result != 0:
+                raise RuntimeError(f"Browser failed on graceful systemd stop (status={browser_result}).\n"
+                                   + journal(browser_invocation))
             assert active("traffic-manual-pktgen.service"), "browser stop affected pktgen"
             # SIGKILL tests systemd ExecStopPost cleanup rather than Python finally.
             run("systemctl", "kill", "--kill-whom=main", "--signal=SIGKILL", "traffic-manual-pktgen.service")
@@ -88,17 +143,18 @@ def main():
             assert "lab0@tt" not in result, "pktgen device leaked after unexpected termination"
             tcpdump.terminate()
             tcpdump.wait(timeout=5)
-            packets = subprocess.check_output(["tcpdump", "-nr", str(capture)], text=True)
+            packets = subprocess.check_output(["tcpdump", "-nn", "-r", str(capture)], text=True)
             assert ".8000" in packets, "no genuine browser HTTP traffic captured"
             assert ".9000:" in packets, "no kernel UDP traffic captured"
-            logs = subprocess.check_output(["journalctl", f"_SYSTEMD_INVOCATION_ID={browser_invocation}", "--no-pager"], text=True)
+            logs = journal(browser_invocation)
             assert "browser request success" in logs, "browser did not verify HTTP success"
             assert "browser stopped" in logs, "browser did not report graceful shutdown"
             assert "Future exception was never retrieved" not in logs, "unhandled asynchronous shutdown error"
             assert "TargetClosedError" not in logs, "unhandled browser-close error"
             print("PASS: real HTTP, kernel UDP, concurrent operation, independent stop, clean browser shutdown, SIGKILL cleanup, isolated topology")
     finally:
-        subprocess.run(["systemctl", "stop", "traffic-manual-browser.service", "traffic-manual-pktgen.service"], check=False)
+        for unit in ("traffic-manual-browser.service", "traffic-manual-pktgen.service"):
+            stop_if_loaded(unit)
         for child in children:
             if child.poll() is None:
                 child.terminate()

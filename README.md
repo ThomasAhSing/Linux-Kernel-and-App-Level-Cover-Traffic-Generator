@@ -120,6 +120,11 @@ For pktgen, use the original lab configuration/commands in [LAB_GUIDE.md](LAB_GU
 
 ## Weekday scheduling and stopping
 
+Browser units and manual runs use `KillMode=mixed`: systemd sends SIGTERM to
+Python first, allowing it to close the Playwright driver and Chromium before
+the fallback kills remaining processes. Pktgen retains control-group stopping.
+See [systemd.kill](https://www.freedesktop.org/software/systemd/man/latest/systemd.kill.html).
+
 For final deployment checks, follow [ACCEPTANCE.md](ACCEPTANCE.md). It includes
 the shutdown regression, accelerated schedule tests, real systemd signal and
 emergency-stop checks, and actual reboot/boundary acceptance on Ubuntu.

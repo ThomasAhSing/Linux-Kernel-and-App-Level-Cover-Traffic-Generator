@@ -2,6 +2,18 @@
 
 ## External browser mode
 
+* `Browser.close: Connection closed while reading from the driver` after
+  `shutdown signal=15`: check `systemctl show traffic-browser -p KillMode` and,
+  during a manual test, `systemctl show traffic-manual-browser -p KillMode`.
+  Both should report `mixed`, so Python can close its children before the
+  fallback cgroup kill. Update/reinstall both browser units and `manual.sh`;
+  merely updating Python does not change systemd's signal delivery policy.
+  Do not suppress arbitrary driver-connection errors during normal operation.
+* Integration reports no HTTP capture: the test now waits for an actual HTTP
+  success in its invocation journal, not just active service state or a fixed
+  five-second sleep. Early exit/readiness timeout includes that journal. An
+  intentional pktgen SIGKILL remains expected; a nonzero browser exit is not.
+
 * `Future exception was never retrieved` / `TargetClosedError` at the manual
   deadline: upgrade the installed code, not just the source checkout. The new
   shutdown path closes the page, awaits the in-flight navigation and closes

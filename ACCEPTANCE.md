@@ -47,7 +47,10 @@ Expected:
   SIGTERM handler, require prompt shutdown and reject unhandled async errors.
   These inject a localhost fixture directly into the workload; production URL
   validation is unchanged and no schedule override is installed.
-* Linux namespace integration prints PASS for real HTTP, UDP generation,
+* Linux namespace integration waits for a verified HTTP response and a nonzero
+  pktgen packet count before deliberately stopping/killing either workload.
+  It allows cold Chromium startup up to a bounded readiness timeout, rather
+  than assuming five seconds is sufficient. It prints PASS for real HTTP, UDP generation,
   independent stop, clean browser shutdown, SIGKILL pktgen cleanup and isolation.
   It refuses active scheduled/manual workloads and an existing emergency flag.
 
@@ -90,7 +93,13 @@ sudo journalctl -u traffic-manual-browser --since '-3 min' --no-pager
 ```
 
 Expected: the workload handles SIGTERM, closes the browser, and its transient
-unit becomes inactive/removed. Repeat the run and this time stop it with:
+unit becomes inactive/removed. Browser services use `KillMode=mixed`: SIGTERM
+goes to Python first so it can close the Playwright driver and Chromium. Any
+remaining cgroup processes are forcibly killed after stop timeout/main exit.
+Pktgen retains its separate control-group stop policy. Check the installed
+browser policy with `systemctl show traffic-browser -p KillMode` (expected
+`mixed`); while a manual browser run is active, check the transient unit too.
+Repeat the run and this time stop it with:
 
 ```bash
 sudo /opt/traffic-testbed/emergency-stop.sh
