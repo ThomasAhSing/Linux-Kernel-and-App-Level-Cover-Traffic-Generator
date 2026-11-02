@@ -13,4 +13,4 @@ for unit in traffic-lab.service traffic-http.service traffic-browser.service tra
 done
 systemctl daemon-reload
 rm -rf -- /opt/traffic-testbed
-echo 'Removed program and units. Configuration and traffic-testbed system account retained.'
+echo 'Removed program and units. Configuration, browser budget state and traffic-testbed system account retained.'

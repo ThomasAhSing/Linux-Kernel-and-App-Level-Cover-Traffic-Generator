@@ -107,7 +107,7 @@ class Scheduling(unittest.TestCase):
 class BrowserRoutes(unittest.IsolatedAsyncioTestCase):
     async def exercise(self, requests, max_requests=200, per_page=50):
         routes = []
-        context = Mock(route=AsyncMock(), route_web_socket=AsyncMock())
+        context = Mock(route=AsyncMock(), route_web_socket=AsyncMock(), close=AsyncMock())
 
         async def navigate(*args, **kwargs):
             guard = context.route.call_args.args[1]

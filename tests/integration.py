@@ -70,6 +70,11 @@ def main():
                 proc = subprocess.Popen(["/opt/traffic-testbed/manual.sh", component, "20", str(config)])
                 children.append(proc)
                 wait_active(f"traffic-manual-{component}.service")
+                if component == "browser":
+                    browser_invocation = subprocess.check_output([
+                        "systemctl", "show", "--value", "-p", "InvocationID", "traffic-manual-browser.service"
+                    ], text=True).strip()
+                    assert len(browser_invocation) == 32, "missing browser invocation id"
             time.sleep(5)
             run("systemctl", "stop", "traffic-manual-browser.service")
             assert active("traffic-manual-pktgen.service"), "browser stop affected pktgen"
@@ -86,9 +91,12 @@ def main():
             packets = subprocess.check_output(["tcpdump", "-nr", str(capture)], text=True)
             assert ".8000" in packets, "no genuine browser HTTP traffic captured"
             assert ".9000:" in packets, "no kernel UDP traffic captured"
-            logs = subprocess.check_output(["journalctl", "-u", "traffic-manual-browser", "--since", "-1min", "--no-pager"], text=True)
+            logs = subprocess.check_output(["journalctl", f"_SYSTEMD_INVOCATION_ID={browser_invocation}", "--no-pager"], text=True)
             assert "browser request success" in logs, "browser did not verify HTTP success"
-            print("PASS: real HTTP, kernel UDP, concurrent operation, independent stop, SIGKILL cleanup, isolated topology")
+            assert "browser stopped" in logs, "browser did not report graceful shutdown"
+            assert "Future exception was never retrieved" not in logs, "unhandled asynchronous shutdown error"
+            assert "TargetClosedError" not in logs, "unhandled browser-close error"
+            print("PASS: real HTTP, kernel UDP, concurrent operation, independent stop, clean browser shutdown, SIGKILL cleanup, isolated topology")
     finally:
         subprocess.run(["systemctl", "stop", "traffic-manual-browser.service", "traffic-manual-pktgen.service"], check=False)
         for child in children:

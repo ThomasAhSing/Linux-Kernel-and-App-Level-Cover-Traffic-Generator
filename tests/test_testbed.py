@@ -145,29 +145,37 @@ class Schedule(unittest.TestCase):
 
 
 class Browser(unittest.IsolatedAsyncioTestCase):
-    async def test_boundary_cancels_inflight_navigation_and_closes_browser(self):
+    async def test_boundary_drains_inflight_navigation_and_closes_browser(self):
         entered = asyncio.Event()
+        pending = asyncio.get_running_loop().create_future()
+        active = True
 
         async def navigate(*args, **kwargs):
             entered.set()
-            await asyncio.Future()
+            await pending
 
-        page = Mock(goto=AsyncMock(side_effect=navigate))
-        context = Mock(route=AsyncMock(), route_web_socket=AsyncMock(), new_page=AsyncMock(return_value=page))
+        async def close_page():
+            if not pending.done():
+                pending.set_exception(RuntimeError("Target page has been closed"))
+
+        page = Mock(goto=AsyncMock(side_effect=navigate), close=AsyncMock(side_effect=close_page))
+        context = Mock(route=AsyncMock(), route_web_socket=AsyncMock(), close=AsyncMock(), new_page=AsyncMock(return_value=page))
         process = Mock(new_context=AsyncMock(return_value=context), close=AsyncMock())
         launcher = Mock(launch=AsyncMock(return_value=process))
         task = asyncio.create_task(t.browser(config()["browser"], None, launcher))
-        with patch.object(t, "allowed", return_value=True):
+        with patch.object(t, "allowed", side_effect=lambda deadline: active):
             await asyncio.wait_for(entered.wait(), timeout=1)
-            task.cancel()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
+            active = False
+            await asyncio.wait_for(task, timeout=1)
+        self.assertTrue(pending.done())
+        page.close.assert_awaited_once()
+        context.close.assert_awaited_once()
         process.close.assert_awaited_once()
 
     async def test_success_failure_counts_and_cleanup(self):
         page = Mock()
         page.goto = AsyncMock(side_effect=[Mock(ok=True, status=200), RuntimeError("timeout")])
-        context = Mock(route=AsyncMock(), route_web_socket=AsyncMock(), new_page=AsyncMock(return_value=page))
+        context = Mock(route=AsyncMock(), route_web_socket=AsyncMock(), close=AsyncMock(), new_page=AsyncMock(return_value=page))
         process = Mock(new_context=AsyncMock(return_value=context), close=AsyncMock())
         launcher = Mock(launch=AsyncMock(return_value=process))
         p = config()["browser"]

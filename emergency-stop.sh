@@ -3,7 +3,7 @@ set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo 'run with sudo' >&2; exit 1; }
 touch /etc/traffic-testbed/DISABLED
 systemctl disable --now traffic-schedule.timer
-# Stop reconciliation before masking to avoid a concurrent start race.
+# Stop reconciliation before stopping units to avoid a concurrent start race.
 systemctl stop traffic-schedule.service
 systemctl stop traffic-browser.service traffic-browser-lab.service traffic-pktgen.service
 systemctl stop 'traffic-manual-*.service'

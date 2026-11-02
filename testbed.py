@@ -16,12 +16,14 @@ import subprocess
 import sys
 import time
 from urllib.parse import urlsplit
+from browser_budget import DailyBudget
 
 LOG = logging.getLogger("testbed")
 PROC = Path("/proc/net/pktgen")
 CONFIG = "/etc/traffic-testbed/config.json"
 DISABLED = Path("/etc/traffic-testbed/DISABLED")
 STOP = False
+BROWSER_STATE = Path("/var/lib/traffic-testbed-browser/daily-budget.json")
 
 
 def origin(url, external=True, origin_only=False):
@@ -95,9 +97,14 @@ def validate(c, component=None):
         if name == "browser" and "urls" in p:
             expected = {"enabled", "network_mode", "urls", "authorized_origins", "asset_origins",
                         "interval_seconds", "request_limit", "timeout_seconds", "max_requests", "max_requests_per_page"}
-        if set(p) != expected or type(p["enabled"]) is not bool:
+        optional = {"repeat_during_window", "cycle_pause_seconds", "daily_request_limit"} if name == "browser" else set()
+        if set(p) - optional != expected or type(p["enabled"]) is not bool:
             raise ValueError(f"{name}: invalid keys or enabled flag")
         if name == "browser":
+            if type(p.get("repeat_during_window", False)) is not bool:
+                raise ValueError("repeat_during_window must be a boolean")
+            number(p.get("cycle_pause_seconds", 900), 60, 3600, "cycle pause", True)
+            number(p.get("daily_request_limit", 1000), 1, 10000, "daily HTTP request limit", True)
             b = browser_settings(p)
             if b["network_mode"] not in ("lab", "external"):
                 raise ValueError("network_mode must be lab or external")
@@ -256,14 +263,46 @@ def kernel(p, deadline):
             writer.wait(timeout=5)
 
 
-async def browser(p, deadline, launcher=None):
+async def navigation(page, url, timeout_seconds, deadline):
+    """Abort through Playwright, then retrieve the pending API result.
+
+    Never cancel page.goto's task: cancelling the wrapper before Playwright
+    resolves its internal protocol future caused unhandled TargetClosedError.
+    """
+    pending = asyncio.create_task(page.goto(url, timeout=timeout_seconds * 1000, wait_until="load"))
+    try:
+        while not pending.done():
+            if not allowed(deadline):
+                LOG.info("closing in-flight navigation for shutdown")
+                await page.close()
+                await asyncio.gather(pending, return_exceptions=True)
+                return None
+            await asyncio.wait({pending}, timeout=0.05)
+        return await pending
+    finally:
+        # Also drain the API operation if an unexpected caller cancellation
+        # occurs. This is cleanup, not a blanket event-loop error filter.
+        if not pending.done():
+            try:
+                await page.close()
+            finally:
+                await asyncio.gather(pending, return_exceptions=True)
+        else:
+            await asyncio.gather(pending, return_exceptions=True)
+
+
+async def browser(p, deadline, launcher=None, budget=None):
     p = browser_settings(p)
     if launcher is None:
         from playwright.async_api import async_playwright
         async with async_playwright() as api:
-            return await browser(p, deadline, api.chromium)
-    browser_process = await launcher.launch(headless=True)
+            return await browser(p, deadline, api.chromium, budget)
+    browser_process = await launcher.launch(headless=True, timeout=15000,
+                                            handle_sigint=False, handle_sigterm=False, handle_sighup=False)
     count = errors = sent = blocked = page_requests = 0
+    context = None
+    closing = False
+    budget_error = None
     try:
         context = await browser_process.new_context(service_workers="block", accept_downloads=False,
                                                      ignore_https_errors=False)
@@ -273,7 +312,7 @@ async def browser(p, deadline, launcher=None):
         asset_origins = navigation_origins | {origin(x, external) for x in p["asset_origins"]}
 
         async def guard(route):
-            nonlocal sent, blocked, page_requests
+            nonlocal sent, blocked, page_requests, budget_error
             request = route.request
             try:
                 target = origin(request.url, external)
@@ -282,59 +321,108 @@ async def browser(p, deadline, launcher=None):
                     permitted = permitted and request.url in urls
             except ValueError:
                 permitted = False
-            if (permitted and request.method in ("GET", "HEAD") and allowed(deadline)
-                    and sent < p["max_requests"] and page_requests < p["max_requests_per_page"]):
+            reason = None
+            if not permitted:
+                reason = "origin"
+            elif request.method not in ("GET", "HEAD"):
+                reason = "method"
+            elif closing or not allowed(deadline):
+                reason = "shutdown/schedule"
+            elif budget_error is not None:
+                reason = "daily budget persistence failure"
+            elif sent >= p["max_requests"]:
+                reason = "cycle HTTP budget"
+            elif page_requests >= p["max_requests_per_page"]:
+                reason = "page HTTP budget"
+            elif budget is not None:
+                try:
+                    if not budget.reserve():
+                        reason = "daily HTTP budget"
+                except Exception as exc:
+                    budget_error = exc
+                    reason = "daily budget persistence failure"
+                    LOG.error("daily budget persistence failed; stopping browser: %s", exc)
+            if budget_error is not None:
+                reason = "daily budget persistence failure"
+            if reason is None and not allowed(deadline):
+                reason = "shutdown/schedule"
+            if reason is None:
                 sent += 1
                 page_requests += 1
-                await route.continue_()
+                try:
+                    await route.continue_()
+                except Exception:
+                    if not closing and allowed(deadline):
+                        raise
             else:
                 blocked += 1
-                LOG.warning("blocked request (origin/method/budget/schedule) %s", request.url)
-                await route.abort()
+                LOG.warning("blocked request reason=%s url=%s", reason, request.url)
+                try:
+                    await route.abort()
+                except Exception:
+                    if not closing and allowed(deadline):
+                        raise
 
         await context.route("**/*", guard)
         async def block_socket(socket):
             await socket.close()
         await context.route_web_socket("**/*", block_socket)
         page = await context.new_page()
-        while allowed(deadline) and count < p["request_limit"] and sent < p["max_requests"]:
+        while (allowed(deadline) and count < p["request_limit"] and sent < p["max_requests"]
+               and budget_error is None and (budget is None or budget.available())):
             page_requests = 0
             started = time.monotonic()
             target_url = urls[count % len(urls)]
             try:
-                response = await page.goto(target_url,
-                                           timeout=p["timeout_seconds"] * 1000,
-                                           wait_until="load")
+                response = await navigation(page, target_url, p["timeout_seconds"], deadline)
+                if not allowed(deadline):
+                    break
                 if response is None or not response.ok:
                     raise RuntimeError(f"HTTP failure: {getattr(response, 'status', None)}")
                 LOG.info("browser request success status=%s url=%s", response.status, target_url)
             except Exception as exc:
+                if not allowed(deadline):
+                    LOG.info("navigation ended during shutdown")
+                    break
                 errors += 1
                 LOG.error("browser request failed: %s", exc)
             count += 1
             LOG.info("browser count=%d errors=%d http_requests=%d blocked=%d elapsed_seconds=%.3f",
                      count, errors, sent, blocked, time.monotonic()-started)
-            while allowed(deadline) and time.monotonic() - started < p["interval_seconds"]:
+            while (allowed(deadline) and budget_error is None and (budget is None or budget.available())
+                   and time.monotonic() - started < p["interval_seconds"]):
                 await asyncio.sleep(0.05)
+        if budget_error is not None:
+            raise RuntimeError("daily budget could not be persisted; no further traffic permitted") from budget_error
     finally:
-        await browser_process.close()
-        LOG.info("browser stopped requests=%d errors=%d http_requests=%d blocked=%d", count, errors, sent, blocked)
+        closing = True
+        try:
+            if context is not None:
+                await context.close()
+        finally:
+            await browser_process.close()
+            LOG.info("browser stopped requests=%d errors=%d http_requests=%d blocked=%d", count, errors, sent, blocked)
 
 
 async def supervised_browser(p, deadline):
-    task = asyncio.create_task(browser(p, deadline))
-    try:
-        while not task.done() and allowed(deadline):
+    if deadline is not None or not p.get("repeat_during_window", False):
+        await browser(p, deadline)
+        return
+    budget = DailyBudget(BROWSER_STATE, p.get("daily_request_limit", 1000))
+    cycle = 0
+    while allowed(None) and budget.available():
+        cycle += 1
+        LOG.info("scheduled browser cycle=%d started; daily_limit=%d", cycle, budget.limit)
+        await browser(p, None, budget=budget)
+        if not allowed(None) or not budget.available():
+            break
+        pause = p.get("cycle_pause_seconds", 900)
+        LOG.info("browser cycle=%d complete; cooldown_seconds=%d", cycle, pause)
+        until = time.monotonic() + pause
+        while allowed(None) and time.monotonic() < until:
             await asyncio.sleep(0.05)
-        if not task.done():
-            task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-    finally:
-        if not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+    if not budget.available():
+        LOG.warning("daily browser HTTP budget exhausted; stopped until next local day")
 
 
 def stop_signal(signum, frame):

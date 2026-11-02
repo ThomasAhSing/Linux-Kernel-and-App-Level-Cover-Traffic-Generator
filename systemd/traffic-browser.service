@@ -10,6 +10,8 @@ User=traffic-testbed
 Group=traffic-testbed
 RuntimeDirectory=traffic-testbed-browser
 RuntimeDirectoryPreserve=yes
+StateDirectory=traffic-testbed-browser
+StateDirectoryMode=0700
 Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/traffic-testbed/browsers
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/traffic-testbed/venv/bin/python /opt/traffic-testbed/testbed.py run browser --network-mode external

@@ -13,7 +13,7 @@ apt-get install -y python3 python3-venv iproute2 kmod util-linux tcpdump
 bash ./preflight.sh
 id traffic-testbed &>/dev/null || useradd --system --no-create-home --shell /usr/sbin/nologin traffic-testbed
 install -d -m 0755 /opt/traffic-testbed /etc/traffic-testbed
-install -m 0644 testbed.py schedule.py http_server.py requirements.txt /opt/traffic-testbed/
+install -m 0644 testbed.py browser_budget.py schedule.py http_server.py requirements.txt /opt/traffic-testbed/
 install -m 0644 config.example.json config.lab.example.json /opt/traffic-testbed/
 install -m 0755 lab.sh preflight.sh emergency-stop.sh manual.sh /opt/traffic-testbed/
 if [[ ! -e /etc/traffic-testbed/config.json ]]; then

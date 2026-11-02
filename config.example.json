@@ -10,7 +10,10 @@
     "request_limit": 20,
     "timeout_seconds": 15,
     "max_requests": 200,
-    "max_requests_per_page": 50
+    "max_requests_per_page": 50,
+    "repeat_during_window": false,
+    "cycle_pause_seconds": 900,
+    "daily_request_limit": 1000
   },
   "pktgen": {
     "enabled": false,

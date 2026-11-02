@@ -2,6 +2,20 @@
 
 ## External browser mode
 
+* `Future exception was never retrieved` / `TargetClosedError` at the manual
+  deadline: upgrade the installed code, not just the source checkout. The new
+  shutdown path closes the page, awaits the in-flight navigation and closes
+  the context before the browser. Run `tests/browser_shutdown_live.py` with
+  `PLAYWRIGHT_BROWSERS_PATH=/opt/traffic-testbed/browsers` using the installed
+  venv. An unrelated unexpected browser crash still needs investigation.
+* Repeated scheduled runs stop early: inspect the daily budget log and state
+  at `/var/lib/traffic-testbed-browser/daily-budget.json`. It survives reboot
+  and service restarts. A malformed/unwritable file fails closed. Both browser
+  units need the updated `StateDirectory=traffic-testbed-browser` setting;
+  reinstall units and reload systemd after upgrading. Do not delete state to
+  bypass an exhausted cap. Manual tests do not repeat or spend this scheduled
+  allowance. Follow ACCEPTANCE.md to enable repetition explicitly.
+
 * Existing installations keep their original lab config. Follow README.md to replace only the browser section from `/opt/traffic-testbed/config.example.json`; setting `enabled` alone on the old config still selects local lab mode.
 * External browsing is captured on the VM's normal network interface (or `any`), not `sink0`. HTTPS is encrypted; verify HTTP status and page URLs in the journal. Use Wireshark TLS/DNS filters for connection activity.
 * `blocked request (origin/method/budget/schedule)`: check exact authorized origins and asset origins, GET/HEAD method, request budgets, schedule and emergency flag. Regional/consent redirects require explicit navigation authorization; never enable wildcard origins to silence the logs.

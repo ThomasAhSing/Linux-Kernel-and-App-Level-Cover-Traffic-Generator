@@ -120,6 +120,42 @@ For pktgen, use the original lab configuration/commands in [LAB_GUIDE.md](LAB_GU
 
 ## Weekday scheduling and stopping
 
+For final deployment checks, follow [ACCEPTANCE.md](ACCEPTANCE.md). It includes
+the shutdown regression, accelerated schedule tests, real systemd signal and
+emergency-stop checks, and actual reboot/boundary acceptance on Ubuntu.
+
+### Optional repeated browser cycles
+
+Add these optional fields to the browser configuration to run more than one
+bounded cycle during scheduled hours:
+
+```json
+"repeat_during_window": true,
+"cycle_pause_seconds": 900,
+"daily_request_limit": 1000
+```
+
+They default to false, 900 seconds and 1000 HTTP requests. The cycle cooldown
+must be 60–3600 seconds and the daily cap 1–10000 requests. Existing navigation,
+per-page HTTP and cycle HTTP limits remain in effect. After each cycle the
+browser closes, waits for the cooldown and starts another cycle only if the
+window is still open and the daily cap remains available. Manual tests always
+remain a single bounded cycle, regardless of this setting.
+
+When repetition is enabled, approved HTTP requests are reserved in
+`/var/lib/traffic-testbed-browser/daily-budget.json` before transmission. Counts
+survive crashes, restarts and reboot, with a fresh allowance on each new local
+date. A backward clock/date change does not refund an earlier day's usage.
+Corrupt state or a persistence failure stops the workload. The state file is
+retained on uninstall along with configuration, and is writable only by the
+service account. These are intercepted HTTP request counts, not byte or DNS
+limits. Explicit manual tests have their own existing per-run budgets.
+
+Repetition stays disabled until you enable it in your installed configuration;
+installation does not change existing settings. Even with repetition, traffic
+can stop early at the daily cap or when endpoints fail. Use suitable endpoints
+and budgets rather than expecting continuous successful browsing.
+
 Production runs only Monday–Friday 08:00–17:00 in the device's local timezone. Services check the schedule at startup and while running. The timer reconciles current time on both boundaries, boot, and clock/timezone changes; missed events cannot blindly replay an out-of-window start. It selects `traffic-browser.service` for external config or `traffic-browser-lab.service` for local lab config, and stops the unused browser unit. Both modes share one lock; scheduled/manual browser overlap is rejected. Pktgen remains independently managed.
 
 ```bash
@@ -130,7 +166,11 @@ systemctl list-timers --all traffic-schedule.timer
 sudo journalctl -u traffic-browser -u traffic-browser-lab -u traffic-pktgen -u traffic-schedule --since today
 ```
 
-Budgets apply per activation, not per day. The browser can finish before 17:00 when its request limit is reached. systemd/Linux are not hard real-time: in-flight requests/packets, suspension and CPU starvation can delay completion. The local lab guide details finite pktgen batches and timing limitations.
+Without repetition, budgets apply per activation. With repetition, each cycle
+has those budgets plus the persistent daily HTTP cap. The browser can finish
+before 17:00 when its cap is reached. systemd/Linux are not hard real-time:
+in-flight requests/packets, suspension and CPU starvation can delay completion.
+The local lab guide details finite pktgen batches and timing limitations.
 
 Emergency stop persists across reboot and stops both browser modes and manual runs:
 
@@ -138,7 +178,11 @@ Emergency stop persists across reboot and stops both browser modes and manual ru
 sudo /opt/traffic-testbed/emergency-stop.sh
 ```
 
-To explicitly clear the block later, remove `/etc/traffic-testbed/DISABLED`. Scheduling stays disabled until you enable it again. To uninstall, stop any tcpdump/lab inspection processes, then run `sudo bash uninstall.sh`. Configuration and the system account are retained; program files, units and owned lab namespaces are removed.
+To explicitly clear the block later, remove `/etc/traffic-testbed/DISABLED`.
+Scheduling stays disabled until you enable it again. To uninstall, stop any
+tcpdump/lab inspection processes, then run `sudo bash uninstall.sh`.
+Configuration, persistent browser budget state and the system account are
+retained; program files, units and owned lab namespaces are removed.
 
 ## Tests and troubleshooting
 
