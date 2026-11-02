@@ -35,6 +35,7 @@ def main():
     for component in ("browser", "pktgen"):
         assert not active(f"traffic-{component}.service"), "stop scheduled generators first"
         assert not active(f"traffic-manual-{component}.service"), "manual workload already active"
+    assert not active("traffic-browser-lab.service"), "stop lab browser before integration testing"
     assert not Path("/etc/traffic-testbed/DISABLED").exists(), "emergency disable flag present"
     lab_was_active = active("traffic-lab.service")
     http_was_active = active("traffic-http.service")
@@ -51,7 +52,7 @@ def main():
         with tempfile.TemporaryDirectory(prefix="traffic-testbed-") as directory:
             os.chmod(directory, 0o755)
             root = Path(directory)
-            c = json.loads((Path(__file__).parents[1] / "config.example.json").read_text())
+            c = json.loads((Path(__file__).parents[1] / "config.lab.example.json").read_text())
             c["browser"].update(enabled=True, request_limit=100)
             c["pktgen"].update(enabled=True, interface="lab0", destination="10.203.0.2",
                                 authorized_destinations=["10.203.0.2"])

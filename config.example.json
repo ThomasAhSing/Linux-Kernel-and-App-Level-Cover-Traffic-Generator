@@ -2,12 +2,15 @@
   "log_level": "INFO",
   "browser": {
     "enabled": false,
-    "base_url": "http://10.203.0.2:8000",
-    "authorized_origins": ["http://10.203.0.2:8000"],
-    "pages": ["/", "/page-two"],
-    "interval_seconds": 2,
-    "request_limit": 100,
-    "timeout_seconds": 5
+    "network_mode": "external",
+    "urls": ["https://www.google.com/", "https://www.wikipedia.org/"],
+    "authorized_origins": ["https://www.google.com", "https://www.wikipedia.org"],
+    "asset_origins": ["https://www.gstatic.com", "https://upload.wikimedia.org"],
+    "interval_seconds": 15,
+    "request_limit": 20,
+    "timeout_seconds": 15,
+    "max_requests": 200,
+    "max_requests_per_page": 50
   },
   "pktgen": {
     "enabled": false,

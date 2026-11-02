@@ -1,0 +1,21 @@
+{
+  "log_level": "INFO",
+  "browser": {
+    "enabled": false,
+    "base_url": "http://10.203.0.2:8000",
+    "authorized_origins": ["http://10.203.0.2:8000"],
+    "pages": ["/", "/page-two"],
+    "interval_seconds": 2,
+    "request_limit": 100,
+    "timeout_seconds": 5
+  },
+  "pktgen": {
+    "enabled": false,
+    "destination": "",
+    "authorized_destinations": [],
+    "interface": "",
+    "packet_size": 128,
+    "packet_rate": 100,
+    "max_bandwidth_bps": 1000000
+  }
+}

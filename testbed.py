@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated lab workloads. No routing, DNS, or external service integration."""
+"""Allowlisted browser workloads and an independently isolated kernel generator."""
 import argparse
 import asyncio
 import contextlib
@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -21,6 +22,50 @@ PROC = Path("/proc/net/pktgen")
 CONFIG = "/etc/traffic-testbed/config.json"
 DISABLED = Path("/etc/traffic-testbed/DISABLED")
 STOP = False
+
+
+def origin(url, external=True, origin_only=False):
+    """Canonical exact origins, with no wildcard/suffix or userinfo matching."""
+    if not isinstance(url, str) or not url or any(ord(x) <= 32 for x in url) or "\\" in url:
+        raise ValueError("URL must not contain whitespace, controls or backslashes")
+    u = urlsplit(url)
+    if u.scheme not in (("https",) if external else ("http", "https")) or not u.hostname:
+        raise ValueError("external websites require an absolute HTTPS URL")
+    if u.username is not None or u.password is not None or u.fragment:
+        raise ValueError("URL credentials and fragments are prohibited")
+    host = u.hostname.encode("idna").decode("ascii").lower()
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        if (not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", host)
+                or any(not x or len(x) > 63 or x.startswith("-") or x.endswith("-") for x in host.split("."))
+                or len(host) > 253 or "." not in host or host.endswith((".local", ".localhost", ".internal"))):
+            raise ValueError("invalid external hostname")
+    else:
+        if external and not address.is_global:
+            raise ValueError("external URLs cannot use nonpublic IP literals")
+        if address.version == 6:
+            host = f"[{host}]"
+    port = u.port
+    if external and port not in (None, 443):
+        raise ValueError("external browsing uses HTTPS port 443 only")
+    if origin_only and (u.path not in ("", "/") or u.query):
+        raise ValueError("authorized origins must not contain paths or queries")
+    default = 443 if u.scheme == "https" else 80
+    return f"{u.scheme}://{host}" + (f":{port}" if port and port != default else "")
+
+
+def browser_settings(p):
+    """Keep the original local configuration usable for offline integration tests."""
+    if "urls" in p:
+        return p
+    return dict(p, network_mode="lab", urls=[p["base_url"] + x for x in p["pages"]],
+                asset_origins=[], max_requests=min(p["request_limit"] * 50, 1000),
+                max_requests_per_page=50)
+
+
+def browser_mode(p):
+    return browser_settings(p)["network_mode"]
 
 
 def in_window(now=None):
@@ -47,12 +92,37 @@ def validate(c, component=None):
                      "request_limit", "timeout_seconds"} if name == "browser" else
                     {"enabled", "destination", "authorized_destinations", "interface",
                      "packet_size", "packet_rate", "max_bandwidth_bps"})
+        if name == "browser" and "urls" in p:
+            expected = {"enabled", "network_mode", "urls", "authorized_origins", "asset_origins",
+                        "interval_seconds", "request_limit", "timeout_seconds", "max_requests", "max_requests_per_page"}
         if set(p) != expected or type(p["enabled"]) is not bool:
             raise ValueError(f"{name}: invalid keys or enabled flag")
         if name == "browser":
-            number(p["interval_seconds"], 1, 3600, "interval")
+            b = browser_settings(p)
+            if b["network_mode"] not in ("lab", "external"):
+                raise ValueError("network_mode must be lab or external")
+            external = b["network_mode"] == "external"
+            number(p["interval_seconds"], 5 if external else 1, 3600, "interval")
             number(p["request_limit"], 1, 10000, "request limit", True)
             number(p["timeout_seconds"], 1, 30, "timeout")
+            number(b["max_requests"], 1, 1000, "total HTTP request budget", True)
+            number(b["max_requests_per_page"], 1, 100, "per-page HTTP request budget", True)
+            if not isinstance(b["urls"], list) or not b["urls"] or len(b["urls"]) > 50:
+                raise ValueError("configure between 1 and 50 website URLs")
+            for key in ("authorized_origins", "asset_origins"):
+                if not isinstance(b[key], list) or len(b[key]) > 100:
+                    raise ValueError(f"{key} must be a list of at most 100 exact origins")
+                for entry in b[key]:
+                    origin(entry, external, origin_only=True)
+            authorized = {origin(x, external, True) for x in b["authorized_origins"]}
+            for url in b["urls"]:
+                if origin(url, external) not in authorized:
+                    raise ValueError("website origin is not explicitly authorized")
+                if not external and url not in ("http://10.203.0.2:8000/", "http://10.203.0.2:8000/page-two",
+                                                "https://10.203.0.2:8443/", "https://10.203.0.2:8443/page-two"):
+                    raise ValueError("lab mode only permits the isolated test pages")
+            if "urls" in p:
+                continue
             if not isinstance(p["pages"], list) or not p["pages"] or any(
                 x not in ("/", "/page-two") for x in p["pages"]
             ):
@@ -96,7 +166,8 @@ def load(path, component=None):
 @contextlib.contextmanager
 def exclusive(component):
     import fcntl
-    with open(f"/run/traffic-testbed/{component}.lock", "a") as f:
+    directory = "/run/traffic-testbed-browser" if component == "browser" else "/run/traffic-testbed"
+    with open(f"{directory}/{component}.lock", "a") as f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as e:
@@ -186,44 +257,68 @@ def kernel(p, deadline):
 
 
 async def browser(p, deadline, launcher=None):
+    p = browser_settings(p)
     if launcher is None:
         from playwright.async_api import async_playwright
         async with async_playwright() as api:
             return await browser(p, deadline, api.chromium)
     browser_process = await launcher.launch(headless=True)
-    count = errors = 0
+    count = errors = sent = blocked = page_requests = 0
     try:
-        context = await browser_process.new_context(service_workers="block")
-        urls = [p["base_url"] + path for path in p["pages"]]
+        context = await browser_process.new_context(service_workers="block", accept_downloads=False,
+                                                     ignore_https_errors=False)
+        urls = p["urls"]
+        external = p["network_mode"] == "external"
+        navigation_origins = {origin(x, external) for x in p["authorized_origins"]}
+        asset_origins = navigation_origins | {origin(x, external) for x in p["asset_origins"]}
 
         async def guard(route):
-            if route.request.url in urls and allowed(deadline):
+            nonlocal sent, blocked, page_requests
+            request = route.request
+            try:
+                target = origin(request.url, external)
+                permitted = target in (navigation_origins if request.is_navigation_request() else asset_origins)
+                if not external:
+                    permitted = permitted and request.url in urls
+            except ValueError:
+                permitted = False
+            if (permitted and request.method in ("GET", "HEAD") and allowed(deadline)
+                    and sent < p["max_requests"] and page_requests < p["max_requests_per_page"]):
+                sent += 1
+                page_requests += 1
                 await route.continue_()
             else:
-                LOG.warning("blocked unauthorized request %s", route.request.url)
+                blocked += 1
+                LOG.warning("blocked request (origin/method/budget/schedule) %s", request.url)
                 await route.abort()
 
         await context.route("**/*", guard)
+        async def block_socket(socket):
+            await socket.close()
+        await context.route_web_socket("**/*", block_socket)
         page = await context.new_page()
-        while allowed(deadline) and count < p["request_limit"]:
+        while allowed(deadline) and count < p["request_limit"] and sent < p["max_requests"]:
+            page_requests = 0
             started = time.monotonic()
+            target_url = urls[count % len(urls)]
             try:
-                response = await page.goto(urls[count % len(urls)],
+                response = await page.goto(target_url,
                                            timeout=p["timeout_seconds"] * 1000,
                                            wait_until="load")
                 if response is None or not response.ok:
                     raise RuntimeError(f"HTTP failure: {getattr(response, 'status', None)}")
-                LOG.info("browser request success status=%s", response.status)
+                LOG.info("browser request success status=%s url=%s", response.status, target_url)
             except Exception as exc:
                 errors += 1
                 LOG.error("browser request failed: %s", exc)
             count += 1
-            LOG.info("browser count=%d errors=%d elapsed_seconds=%.3f", count, errors, time.monotonic()-started)
+            LOG.info("browser count=%d errors=%d http_requests=%d blocked=%d elapsed_seconds=%.3f",
+                     count, errors, sent, blocked, time.monotonic()-started)
             while allowed(deadline) and time.monotonic() - started < p["interval_seconds"]:
                 await asyncio.sleep(0.05)
     finally:
         await browser_process.close()
-        LOG.info("browser stopped requests=%d errors=%d", count, errors)
+        LOG.info("browser stopped requests=%d errors=%d http_requests=%d blocked=%d", count, errors, sent, blocked)
 
 
 async def supervised_browser(p, deadline):
@@ -250,10 +345,11 @@ def stop_signal(signum, frame):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["validate", "run", "manual", "cleanup", "_pgstart"])
+    parser.add_argument("action", choices=["validate", "network-mode", "run", "manual", "cleanup", "_pgstart"])
     parser.add_argument("component", nargs="?", choices=["browser", "pktgen"])
     parser.add_argument("--config", default=CONFIG)
     parser.add_argument("--seconds", type=int, default=10)
+    parser.add_argument("--network-mode", choices=["lab", "external"], help="service namespace consistency check")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if args.action == "_pgstart":
@@ -267,12 +363,17 @@ def main():
             cleanup()
         return
     c = load(args.config, args.component)
+    if args.action == "network-mode":
+        print(browser_mode(c["browser"]))
+        return
     LOG.setLevel(c["log_level"])
     if args.action == "validate":
         LOG.info("configuration valid; no network or kernel changes")
         return
     if not args.component:
         parser.error("run/manual requires a component")
+    if args.component == "browser" and args.network_mode and browser_mode(c["browser"]) != args.network_mode:
+        raise ValueError("browser config network_mode does not match the selected service")
     if not c[args.component]["enabled"]:
         LOG.info("%s disabled", args.component)
         return
@@ -289,7 +390,8 @@ def main():
         return
     signal.signal(signal.SIGTERM, stop_signal)
     signal.signal(signal.SIGINT, stop_signal)
-    verify_isolation()
+    if args.component == "pktgen" or browser_mode(c["browser"]) == "lab":
+        verify_isolation()
     with exclusive(args.component):
         LOG.info("%s service started; scheduled=%s", args.component, deadline is None)
         try:

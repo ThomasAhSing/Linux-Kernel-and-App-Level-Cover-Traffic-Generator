@@ -1,5 +1,18 @@
 # Troubleshooting
 
+## External browser mode
+
+* Existing installations keep their original lab config. Follow README.md to replace only the browser section from `/opt/traffic-testbed/config.example.json`; setting `enabled` alone on the old config still selects local lab mode.
+* External browsing is captured on the VM's normal network interface (or `any`), not `sink0`. HTTPS is encrypted; verify HTTP status and page URLs in the journal. Use Wireshark TLS/DNS filters for connection activity.
+* `blocked request (origin/method/budget/schedule)`: check exact authorized origins and asset origins, GET/HEAD method, request budgets, schedule and emergency flag. Regional/consent redirects require explicit navigation authorization; never enable wildcard origins to silence the logs.
+* A browser service network-mode mismatch means you selected the wrong unit. Use `traffic-browser` for external config, `traffic-browser-lab` for lab config, or let `traffic-schedule.service`/`manual.sh` choose. External service has no namespace or local HTTP dependencies.
+* DNS/HTTPS failures: verify the VM has internet and working DNS, correct system time, and trusted CA certificates. Certificate checks remain enabled. A 403/429/challenge is a failed request; reduce/stop the workload or choose an appropriate endpoint.
+* The browser lock moved to `/run/traffic-testbed-browser/browser.lock`. Both browser services and the manual wrapper use the same systemd RuntimeDirectory and unprivileged account. Do not run the Python entry point directly as root.
+
+## Original isolated lab mode
+
+The entries below describe the local fixture. Its browser service is now named `traffic-browser-lab`; `traffic-browser` is the new external service.
+
 * **Windows / WSL denied:** this service requires an Ubuntu Linux kernel and systemd. Portable tests work on Windows, but kernel tests require a Linux VM. Do not treat mocked tests as live kernel verification.
 * **`modprobe: FATAL: Module pktgen not found`:** inspect `grep CONFIG_NET_PKTGEN /boot/config-$(uname -r)`. Install the matching Ubuntu modules-extra package if available, or use a pktgen-enabled kernel. Containers commonly lack module-loading capabilities; use a VM.
 * **Config rejected:** run `sudo /opt/traffic-testbed/venv/bin/python /opt/traffic-testbed/testbed.py validate`. Destination must be explicitly `10.203.0.2`, allowlisted, with `lab0`; production never accepts another destination. Blank defaults intentionally disable pktgen. Inspect the full exception in the journal. Configuration for a component is validated independently of the other component.

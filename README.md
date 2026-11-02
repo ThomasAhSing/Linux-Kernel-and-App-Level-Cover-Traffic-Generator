@@ -1,194 +1,153 @@
-# Linux traffic generation testbed
+# Browser and kernel traffic testbed
 
-Ubuntu 24.04 LTS, Python 3.12, systemd and a kernel with `CONFIG_NET_PKTGEN` are required. This directory is independent of the surrounding Dropbox project. There is no integration with other applications.
+Playwright can now visit an explicit list of external HTTPS websites using the Ubuntu VM's normal internet connection. Pktgen remains isolated in the original namespace pair and can only send synthetic UDP to `10.203.0.2:9000`. No host routes or network settings are changed. Both components retain independent lifecycle management, weekday scheduling, locks and emergency shutdown.
 
-Playwright navigates real Chromium pages served by the included HTTP server. Kernel pktgen emits IPv4 UDP frames to port 9000; these are synthetic packets, not simulated application protocols. Separate services, locks, process groups and journals keep both generators independent. The browser service wants the HTTP server; a pktgen failure does not stop the browser and vice versa.
+## Install or upgrade on Ubuntu 24.04
 
-The lab uses **only** `tt-source:lab0 (10.203.0.1/30)` connected to `tt-sink:sink0 (10.203.0.2/30)`. Neither namespace has an external interface, bridge, gateway or default route. No physical interfaces, host routes, host forwarding settings or host firewall rules are changed. Root administrators must keep this topology isolated. Do not attach either endpoint to another network. Exact destination/origin allowlists add validation; namespace topology provides containment because pktgen bypasses ordinary IP routing/firewall processing.
+Run from this source directory. Fetch/copy the updated source into the VM first. Installation preserves existing configuration and never enables scheduling.
 
-## Timing and limits
+```bash
+# Stop scheduling, reconciliation, and workloads before replacing their code.
+sudo systemctl disable --now traffic-schedule.timer
+sudo systemctl stop traffic-schedule.service
+sudo systemctl stop 'traffic-manual-*.service'
+sudo systemctl stop traffic-browser.service traffic-pktgen.service traffic-http.service
+# On upgrades after this version, also stop traffic-browser-lab.service if present.
+sudo systemctl stop traffic-lab.service
+sudo bash install.sh
+sudo systemd-analyze verify /etc/systemd/system/traffic-*.service /etc/systemd/system/traffic-*.timer
+```
 
-The production `run` command checks local time at entry and throughout execution: Monday–Friday, **08:00 inclusive to 17:00 exclusive**. Manual service starts and automatic failure restarts cannot bypass it. The timer fires at both boundaries, at boot, and on clock/timezone changes. Persistent missed events reconcile **current** time rather than blindly replaying an old start. DST uses device local time; there is no hardcoded UTC offset. The services check time every 50 ms. The distinct `manual` command permits an explicit test lasting 1–60 seconds on any day; systemd's scheduled units never use it.
+On a fresh VM, skip the stop commands for units not installed yet. Installation requires Python 3, systemd, internet access to download Playwright/Chromium and OS packages, and a kernel with pktgen support. `preflight.sh` loads/verifies pktgen without generating traffic. If necessary, install the matching `linux-modules-extra-$(uname -r)` package or use a pktgen-enabled kernel. Chromium runs as the unprivileged `traffic-testbed` account.
 
-This is not a hard real-time system. Timer accuracy requests do not guarantee exact dispatch under CPU starvation, suspension, clock jumps or kernel faults. In-flight frames/requests can complete after the boundary. A finite pktgen batch contains at most one second's configured packet count; controller death cannot leave an infinite stream. systemd's `ExecStopPost` stops and resets namespace-local pktgen even after SIGKILL. An emergency flag also persists across reboot. No software implementation can promise zero packets after an arbitrary instantaneous clock jump or frozen controller.
+## Configure an external website list
 
-Packet size is the Ethernet frame length excluding FCS, 60–1514 bytes. Packet rate is capped at 1,000 pps; bandwidth at 1,000,000 bps. The effective rate is the smaller of configured pps and `floor(bandwidth / ((size + 24) * 8))`, accounting for FCS, preamble and inter-frame gap. A rounded-up nanosecond delay, burst=1, clone_skb=0 and finite counts enforce conservative pacing, rather than line-rate injection. These are pacing budgets, not guaranteed precision measurements on veth. Rate, configuration, transmit errors and per-batch kernel statistics go to the journal. Browser navigation intervals are at least one second and limits at most 10,000 attempts per activation (failures count). Browser HTTP success requires a 2xx response. Timeouts and failures are counted and logged; the next configured page is then attempted. systemd reports OOM/CPU resource events in its own journal. Kernel threads are outside service CPUQuota; pktgen's rate/count bounds are the relevant controls.
+The new `config.example.json` is an external-mode template, with both generators disabled. Existing installs retain their old lab configuration until explicitly changed. This command backs up the installed config, replaces only the browser section from the new template, and enables the browser. It preserves your existing pktgen settings:
 
-## Ubuntu commands and expected results
+```bash
+sudo cp -a /etc/traffic-testbed/config.json /etc/traffic-testbed/config.json.before-external
+sudo python3 - <<'PY'
+import json
+path = '/etc/traffic-testbed/config.json'
+with open(path) as f:
+    current = json.load(f)
+with open('/opt/traffic-testbed/config.example.json') as f:
+    template = json.load(f)
+current['browser'] = template['browser']
+current['browser']['enabled'] = True
+with open(path, 'w') as f:
+    json.dump(current, f, indent=2)
+PY
+sudo nano /etc/traffic-testbed/config.json
+```
 
-Run these from this directory on a dedicated Ubuntu VM. Installation downloads packages and Chromium, loads pktgen to verify support, and installs files under `/opt/traffic-testbed` and `/etc/traffic-testbed`. It **does not enable or start scheduled execution**. Existing configuration is preserved. Stop the services and disable the timer before upgrading an existing installation.
+The browser section uses these fields:
 
-1. Install dependencies and the project:
+```json
+{
+  "enabled": true,
+  "network_mode": "external",
+  "urls": ["https://www.google.com/", "https://www.wikipedia.org/"],
+  "authorized_origins": ["https://www.google.com", "https://www.wikipedia.org"],
+  "asset_origins": ["https://www.gstatic.com", "https://upload.wikimedia.org"],
+  "interval_seconds": 15,
+  "request_limit": 20,
+  "timeout_seconds": 15,
+  "max_requests": 200,
+  "max_requests_per_page": 50
+}
+```
 
-   ```bash
-   sudo bash install.sh
-   sudo systemd-analyze verify /etc/systemd/system/traffic-*.service /etc/systemd/system/traffic-*.timer
-   systemctl is-enabled traffic-schedule.timer
-   ```
+* `urls`: 1–50 full page URLs, visited in list order repeatedly until a limit or shutdown. Select websites appropriate for your test.
+* `authorized_origins`: exact scheme/hostname/port origins permitted for pages, redirects and assets. Paths belong in `urls`, not here. `https://google.com` and `https://www.google.com` are different origins. No wildcards or implicit subdomains.
+* `asset_origins`: additional exact origins permitted for images, stylesheets, scripts and other non-navigation requests. These cannot become page/redirect destinations unless also in `authorized_origins`.
+* `interval_seconds`: minimum interval between navigation starts, 5–3600 in external mode. Default 15 seconds; pages are not opened concurrently.
+* `request_limit`: maximum navigation attempts, including failures, per activation (1–10,000).
+* `timeout_seconds`: page-load timeout, 1–30 seconds.
+* `max_requests`: total permitted intercepted HTTP requests, including redirects and assets, per activation (1–1000).
+* `max_requests_per_page`: permitted intercepted HTTP requests during each navigation interval (1–100).
 
-   Expected: `pktgen supported; no packets generated`, installation confirmation, and `disabled` on a fresh installation. Unit verification has no errors. If module loading fails, install `linux-modules-extra-$(uname -r)` if available for your kernel, or boot a kernel built with `CONFIG_NET_PKTGEN=m`. Preflight intentionally fails instead of substituting a userspace packet sender.
+External mode requires HTTPS on port 443 with certificate verification enabled. Credentials in URLs, private IP literals, malformed URLs, HTTP downgrades, unapproved origins and non-GET/HEAD methods are rejected. Service workers, WebSockets and downloads are disabled. The browser uses a temporary profile; it does not sign in or bypass site challenges. No other application's traffic or configuration is changed.
 
-2. Configure and set up the isolated laboratory:
+Some sites redirect to regional/consent domains or fetch assets from additional origins. These remain blocked until explicitly configured. The journal records blocked URLs; review the required origins and add only those you intend to permit. A 403/429 response, challenge or blocked redirect is logged as a failed load, not bypassed. Stop or reduce requests when the chosen site rejects them. The example list is not a guarantee of availability or a complete asset-domain inventory.
 
-   ```bash
-   sudo python3 - <<'PY'
-   import json
-   path = '/etc/traffic-testbed/config.json'
-   with open(path) as f:
-       c = json.load(f)
-   c['browser']['enabled'] = True
-   c['pktgen'].update(enabled=True, interface='lab0', destination='10.203.0.2',
-                      authorized_destinations=['10.203.0.2'])
-   with open(path, 'w') as f:
-       json.dump(c, f, indent=2)
-   PY
-   sudo /opt/traffic-testbed/venv/bin/python /opt/traffic-testbed/testbed.py validate
-   sudo systemctl start traffic-lab.service
-   sudo ip -n tt-source address show
-   sudo ip -n tt-sink address show
-   sudo ip -n tt-source route show
-   sudo ip -n tt-sink route show
-   ```
+These are page-request controls, not a network firewall. DNS and browser-internal traffic are outside the intercepted HTTP budget; hostname validation does not pin DNS answers or enforce an IP-level egress policy. External mode intentionally uses normal VM networking. Use network-level controls if your experiment needs stricter egress containment.
 
-   Expected: validation succeeds; each namespace has loopback and one veth, addresses `.1/30` and `.2/30`, and only the directly connected `10.203.0.0/30` route. **No default route.** Configuration is strict JSON: do not add comments or unknown keys. Disable either component with its own `enabled: false`. All numeric bounds are validated before any generation. `validate` changes no kernel or networking state and does not require Playwright to be installed. Editing configuration requires restarting that generator; it is loaded once per activation.
+Validate before starting:
 
-3. Start the local HTTP server:
+```bash
+sudo /opt/traffic-testbed/venv/bin/python /opt/traffic-testbed/testbed.py validate
+```
 
-   ```bash
-   sudo systemctl start traffic-http.service
-   systemctl status traffic-http.service --no-pager
-   ```
+Expected: `configuration valid; no network or kernel changes`. Configuration is loaded once per activation; restart the relevant workload after edits. `DISABLED`, if present from an earlier emergency stop, must be explicitly removed before runs will start.
 
-   Expected: `active (running)` on `10.203.0.2:8000`, with `/` and `/page-two`. HTTP is the supplied default; HTTPS is supported by Chromium against an operator-provisioned server at `https://10.203.0.2:8443` with a trusted certificate containing that IP address. Update both `base_url` and its exact authorized origin; TLS verification is never disabled. The bundled HTTP service does not provide TLS termination.
+## Run and observe a 60-second test
 
-4. Short real-browser test, including outside the weekday window:
+External browsing needs VM internet/DNS access but does not need the HTTP server, lab service or pktgen. The manual wrapper validates the browser config and chooses normal networking automatically:
 
-   ```bash
-   sudo /opt/traffic-testbed/manual.sh browser 10
-   sudo journalctl -u traffic-manual-browser.service --since '-2 min' --no-pager
-   ```
+```bash
+sudo /opt/traffic-testbed/manual.sh browser 60
+sudo journalctl -u traffic-manual-browser.service --since '-2 min' --no-pager
+```
 
-   Expected: HTTP 200 request successes, alternating pages, counts, elapsed times, and browser shutdown within the bounded test (plus browser cleanup time). A disabled component logs `disabled` without launching. The wrapper uses a nonroot browser user and a transient systemd unit for process cleanup.
+Expected: HTTP status successes (usually 200), visited URLs, navigation/error counts, HTTP request counts and blocked-request counts, followed by browser shutdown. It may finish sooner if a request budget is exhausted. Manual tests can run any day for 1–60 seconds. Unit tests never visit public websites automatically.
 
-5. Short kernel test:
+To capture external browsing, start this in a second terminal **before** the test:
 
-   ```bash
-   sudo /opt/traffic-testbed/manual.sh pktgen 10
-   sudo journalctl -u traffic-manual-pktgen.service --since '-2 min' --no-pager
-   sudo ip netns exec tt-source ls /proc/net/pktgen
-   ```
+```bash
+sudo tcpdump -ni any -w /tmp/external-browser.pcap \
+  'tcp port 443 or udp port 443 or port 53'
+```
 
-   Expected: effective rate 100 pps for the example settings, per-batch `pkts-sofar` statistics and `errors: 0`, then stop/reset. After cleanup, no `lab0@tt` entry remains. The pktgen module stays loaded so unrelated users of it are unaffected.
+Stop capture with Ctrl+C, then:
 
-6. Run both simultaneously and exercise independent stops:
+```bash
+sudo chmod 644 /tmp/external-browser.pcap
+```
 
-   ```bash
-   sudo -v
-   sudo /opt/traffic-testbed/manual.sh browser 30 &
-   sudo /opt/traffic-testbed/manual.sh pktgen 30 &
-   wait
-   ```
+Open the file in Wireshark. Useful display filters:
 
-   While running, use another terminal:
+| Filter | Expected activity |
+| --- | --- |
+| `dns` | Website/domain lookups when not cached and using ordinary DNS |
+| `tls.handshake.type == 1` | TLS ClientHello messages, often showing server names |
+| `tcp.port == 443 || udp.port == 443` | HTTPS connections, including QUIC where used |
+| `tcp.analysis.retransmission` | TCP retransmissions, useful for diagnosing connection problems |
 
-   ```bash
-   systemctl status traffic-manual-browser traffic-manual-pktgen --no-pager
-   sudo systemctl stop traffic-manual-browser.service
-   systemctl is-active traffic-manual-pktgen.service
-   ```
+Unlike the old HTTP lab capture, HTTPS is encrypted: normally you will not see readable `GET` paths or HTTP `200` responses in Wireshark. Use the journal to verify response status and requested URL. Use Statistics → Conversations and I/O Graphs to inspect destinations and traffic volume. CDN addresses vary, and several websites may share an IP. Capturing on `any` may also include unrelated VM traffic. **External browser traffic will not appear on the isolated `sink0` interface.**
 
-   Expected: both initially active; pktgen remains active after stopping the browser. Duplicate controller starts are rejected by per-component `flock` locks, including scheduled/manual overlap. Manual wrappers do not alter installed config, enable scheduling, or automatically start HTTP.
+For pktgen, use the original lab configuration/commands in [LAB_GUIDE.md](LAB_GUIDE.md). Its receiver, port, rate/bandwidth limits and namespace isolation are unchanged. Both components can still run concurrently, each using its appropriate network.
 
-7. Observe browser traffic in another terminal during a test:
+## Weekday scheduling and stopping
 
-   ```bash
-   sudo ip netns exec tt-sink tcpdump -ni sink0 'tcp port 8000'
-   ```
+Production runs only Monday–Friday 08:00–17:00 in the device's local timezone. Services check the schedule at startup and while running. The timer reconciles current time on both boundaries, boot, and clock/timezone changes; missed events cannot blindly replay an out-of-window start. It selects `traffic-browser.service` for external config or `traffic-browser-lab.service` for local lab config, and stops the unused browser unit. Both modes share one lock; scheduled/manual browser overlap is rejected. Pktgen remains independently managed.
 
-   Expected: TCP handshakes and HTTP exchanges for the local server. Press Ctrl-C to end capture.
+```bash
+timedatectl
+sudo systemctl enable --now traffic-schedule.timer
+sudo systemctl start traffic-schedule.service
+systemctl list-timers --all traffic-schedule.timer
+sudo journalctl -u traffic-browser -u traffic-browser-lab -u traffic-pktgen -u traffic-schedule --since today
+```
 
-8. Observe kernel packets and interface counters:
+Budgets apply per activation, not per day. The browser can finish before 17:00 when its request limit is reached. systemd/Linux are not hard real-time: in-flight requests/packets, suspension and CPU starvation can delay completion. The local lab guide details finite pktgen batches and timing limitations.
 
-   ```bash
-   sudo ip netns exec tt-sink tcpdump -ni sink0 'udp dst port 9000'
-   sudo ip netns exec tt-source cat /proc/net/pktgen/lab0@tt
-   sudo ip -s -n tt-source link show lab0
-   sudo ip -s -n tt-sink link show sink0
-   ```
+Emergency stop persists across reboot and stops both browser modes and manual runs:
 
-   Expected during generation: UDP packets solely from `.1` to `.2:9000`, rising counters and kernel counts. The proc device exists only during the run. For Wireshark, capture with `sudo ip netns exec tt-sink tcpdump -ni sink0 -w /tmp/testbed.pcap`, stop it, then open that pcap as your normal desktop user. Capture inside the namespace: the host has no veth endpoint for this lab.
+```bash
+sudo /opt/traffic-testbed/emergency-stop.sh
+```
 
-9. Inspect logs and service/timer state:
+To explicitly clear the block later, remove `/etc/traffic-testbed/DISABLED`. Scheduling stays disabled until you enable it again. To uninstall, stop any tcpdump/lab inspection processes, then run `sudo bash uninstall.sh`. Configuration and the system account are retained; program files, units and owned lab namespaces are removed.
 
-   ```bash
-   sudo journalctl -u traffic-browser -u traffic-pktgen -u traffic-schedule --since today --no-pager
-   systemctl status traffic-browser traffic-pktgen traffic-http --no-pager
-   systemctl list-timers --all traffic-schedule.timer
-   systemd-analyze calendar 'Mon..Fri *-*-* 08:00:00'
-   ```
-
-   Expected: separate scheduled service journals and timer's next weekday boundary once enabled. Before enabling the timer, the scheduled units may be inactive and have no logs. Bounded manual tests use their separate `traffic-manual-*` journals.
-
-10. Stop both workloads immediately, including manual ones:
-
-    ```bash
-    sudo /opt/traffic-testbed/emergency-stop.sh
-    ```
-
-    Expected: scheduling disabled, both generators stopped, and `/etc/traffic-testbed/DISABLED` present. Every loop and new start checks this flag. It persists after reboot. HTTP and lab services can remain up for inspection. Clear it explicitly with `sudo rm /etc/traffic-testbed/DISABLED` before testing or resuming scheduling.
-
-11. Enable weekday scheduling explicitly:
-
-    ```bash
-    sudo rm -f /etc/traffic-testbed/DISABLED
-    sudo systemctl enable --now traffic-schedule.timer
-    sudo systemctl start traffic-schedule.service
-    systemctl list-timers --all traffic-schedule.timer
-    ```
-
-    Expected: current local time is reconciled immediately; enabled generators run inside the weekday window and remain stopped outside it. Browser activation also starts the HTTP server. Boot recovery starts the lab automatically when needed. No service should be enabled directly at boot: only the timer is enabled. To pause scheduling and stop workloads without the persistent flag:
-
-    ```bash
-    sudo systemctl disable --now traffic-schedule.timer
-    sudo systemctl stop traffic-schedule.service
-    sudo systemctl stop traffic-browser.service traffic-pktgen.service
-    ```
-
-12. Disable and uninstall:
-
-    ```bash
-    sudo bash uninstall.sh
-    ```
-
-    Expected: timer and services stopped, transient manual units stopped, owned namespaces deleted, code/venv and unit files removed. Configuration and the system account are retained deliberately. If not needed, remove them explicitly:
-
-    ```bash
-    sudo rm -rf /etc/traffic-testbed
-    sudo userdel traffic-testbed
-    ```
-
-    System packages and the host pktgen module are not removed. Run `lab.sh down` only after stopping all namespace processes; it refuses to delete occupied namespaces. Pre-existing namespaces with these names are never adopted.
-
-## Tests
-
-Portable tests (no third-party test dependency, root, traffic or Playwright installation needed):
+## Tests and troubleshooting
 
 ```bash
 python3 -m unittest discover -s tests -v
-```
-
-Tests cover validation, injection/URL rejection, numeric budgets, boundary and weekend guards, DST local offsets, boot/missed-event reconciliation, independent failures, request successes/timeouts and browser cleanup using an injected fake browser, and pktgen error/cleanup paths. Linux additionally tests actual `flock` exclusion. These are deterministic tests; they do not change host time or wait nine hours.
-
-Live tests on an installed Ubuntu VM, with the schedule disabled and production generators stopped:
-
-```bash
-sudo systemctl disable --now traffic-schedule.timer
-sudo systemctl stop traffic-browser.service traffic-pktgen.service
+# Optional Linux-only live lab tests; stop all generators and disable scheduling first:
 sudo python3 tests/integration.py
 ```
 
-Expected: `PASS: real HTTP, kernel UDP, concurrent operation, independent stop, SIGKILL cleanup, isolated topology`. This test uses a temporary authorized config, real Chromium and pktgen, captures traffic, checks isolation topology, stops the browser while pktgen runs, kills the pktgen controller and checks kernel cleanup. It restores the initial lab/HTTP active state and does not change installed config. Use a disposable VM; no external network is added to either namespace. For actual reboot validation, enable the timer and reboot once inside and once outside the operating window, then inspect journals, counters and timer status. Reboot and hard real-time behavior cannot be established by the portable mocks.
+Portable tests cover legacy lab compatibility, exact external origins, asset versus navigation permissions, redirect policy, URL rejection, HTTP budgets, browser cleanup, schedule selection, pktgen validation and failures. The live integration test deliberately uses `config.lab.example.json` and stays offline in the lab pair. External smoke testing is the explicit manual command above and requires live Ubuntu verification.
 
-## Implementation references
-
-The [Linux pktgen documentation](https://docs.kernel.org/networking/pktgen.html) describes proc controls and statistics. [Linux 6.8 pktgen source](https://github.com/torvalds/linux/blob/v6.8/net/core/pktgen.c) implements namespace-local control. [systemd.timer](https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html) documents calendar accuracy, boot triggers and persistence. [Playwright browser installation](https://playwright.dev/python/docs/browsers) documents browser binaries and OS dependencies; [BrowserContext](https://playwright.dev/python/docs/api/class-browsercontext) documents request routing and service-worker blocking.
+See [TROUBLESHOOTING.md](TROUBLESHOOTING.md). Request interception and service-worker handling follow the [Playwright network documentation](https://playwright.dev/python/docs/network); WebSocket routing uses [BrowserContext](https://playwright.dev/python/docs/api/class-browsercontext). The browser allowlist is evaluated on each redirected request as well as the initial URL.

@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def config():
-    return json.loads((ROOT / "config.example.json").read_text())
+    return json.loads((ROOT / "config.lab.example.json").read_text())
 
 
 def enabled():
@@ -121,14 +121,14 @@ class Schedule(unittest.TestCase):
     def test_boot_missed_event_and_restart_reconcile_current_time(self):
         for inside in (True, False):
             run = Mock(return_value=Mock(returncode=0))
-            self.assertEqual(schedule.reconcile(lambda: inside, run), 0)
-            self.assertEqual(run.call_count, 2)
-            self.assertEqual(run.call_args_list[0].args[0][1], "start" if inside else "stop")
+            self.assertEqual(schedule.reconcile(lambda: inside, run, lambda *a: config()), 0)
+            self.assertEqual(run.call_count, 3)
+            self.assertEqual(run.call_args_list[-1].args[0][1], "start" if inside else "stop")
 
     def test_one_service_failure_does_not_block_other(self):
-        run = Mock(side_effect=[Mock(returncode=1), Mock(returncode=0)])
-        self.assertEqual(schedule.reconcile(lambda: True, run), 1)
-        self.assertEqual(run.call_count, 2)
+        run = Mock(side_effect=[Mock(returncode=0), Mock(returncode=1), Mock(returncode=0)])
+        self.assertEqual(schedule.reconcile(lambda: True, run, lambda *a: config()), 1)
+        self.assertEqual(run.call_count, 3)
 
     def test_emergency_flag_and_stop_signal(self):
         with patch.object(t.DISABLED.__class__, "exists", return_value=True):
@@ -153,7 +153,7 @@ class Browser(unittest.IsolatedAsyncioTestCase):
             await asyncio.Future()
 
         page = Mock(goto=AsyncMock(side_effect=navigate))
-        context = Mock(route=AsyncMock(), new_page=AsyncMock(return_value=page))
+        context = Mock(route=AsyncMock(), route_web_socket=AsyncMock(), new_page=AsyncMock(return_value=page))
         process = Mock(new_context=AsyncMock(return_value=context), close=AsyncMock())
         launcher = Mock(launch=AsyncMock(return_value=process))
         task = asyncio.create_task(t.browser(config()["browser"], None, launcher))
@@ -167,7 +167,7 @@ class Browser(unittest.IsolatedAsyncioTestCase):
     async def test_success_failure_counts_and_cleanup(self):
         page = Mock()
         page.goto = AsyncMock(side_effect=[Mock(ok=True, status=200), RuntimeError("timeout")])
-        context = Mock(route=AsyncMock(), new_page=AsyncMock(return_value=page))
+        context = Mock(route=AsyncMock(), route_web_socket=AsyncMock(), new_page=AsyncMock(return_value=page))
         process = Mock(new_context=AsyncMock(return_value=context), close=AsyncMock())
         launcher = Mock(launch=AsyncMock(return_value=process))
         p = config()["browser"]

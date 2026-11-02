@@ -3,7 +3,7 @@ set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo 'run with sudo' >&2; exit 1; }
 cd -- "$(dirname -- "$0")"
 # Installation must not replace a running controller.
-for unit in traffic-browser.service traffic-pktgen.service traffic-http.service traffic-lab.service traffic-schedule.timer; do
+for unit in traffic-browser.service traffic-browser-lab.service traffic-pktgen.service traffic-http.service traffic-lab.service traffic-schedule.timer traffic-manual-browser.service traffic-manual-pktgen.service; do
     if systemctl is-active --quiet "$unit"; then
         echo "stop $unit before installing" >&2; exit 1
     fi
@@ -14,6 +14,7 @@ bash ./preflight.sh
 id traffic-testbed &>/dev/null || useradd --system --no-create-home --shell /usr/sbin/nologin traffic-testbed
 install -d -m 0755 /opt/traffic-testbed /etc/traffic-testbed
 install -m 0644 testbed.py schedule.py http_server.py requirements.txt /opt/traffic-testbed/
+install -m 0644 config.example.json config.lab.example.json /opt/traffic-testbed/
 install -m 0755 lab.sh preflight.sh emergency-stop.sh manual.sh /opt/traffic-testbed/
 if [[ ! -e /etc/traffic-testbed/config.json ]]; then
     install -o root -g traffic-testbed -m 0640 config.example.json /etc/traffic-testbed/config.json
