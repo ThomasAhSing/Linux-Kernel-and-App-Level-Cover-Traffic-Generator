@@ -6,12 +6,16 @@ Playwright can now visit an explicit list of external HTTPS websites using the U
 
 Run from this source directory. Fetch/copy the updated source into the VM first. Installation preserves existing configuration and never enables scheduling.
 
+Only do if upgrading:
 ```bash
 # Stop scheduling, reconciliation, and workloads before replacing their code.
 sudo systemctl disable --now traffic-schedule.timer
 sudo systemctl stop traffic-schedule.service
 sudo systemctl stop 'traffic-manual-*.service'
 sudo systemctl stop traffic-browser.service traffic-pktgen.service traffic-http.service
+```
+Install
+```bash
 # On upgrades after this version, also stop traffic-browser-lab.service if present.
 sudo systemctl stop traffic-lab.service
 sudo bash install.sh
