@@ -194,6 +194,7 @@ and budgets rather than expecting continuous successful browsing.
 
 Production runs only Monday–Friday 08:00–17:00 in the device's local timezone. Services check the schedule at startup and while running. The timer reconciles current time on both boundaries, boot, and clock/timezone changes; missed events cannot blindly replay an out-of-window start. It selects `traffic-browser.service` for external config or `traffic-browser-lab.service` for local lab config, and stops the unused browser unit. Both modes share one lock; scheduled/manual browser overlap is rejected. Pktgen remains independently managed.
 
+To start actual pepper potter:
 ```bash
 timedatectl
 sudo systemctl enable --now traffic-schedule.timer
