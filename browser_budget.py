@@ -1,4 +1,4 @@
-"""Persistent daily HTTP allowance for scheduled browser cycles.
+"""Persistent daily workload allowance for scheduled browser cycles.
 
 The caller holds the shared browser flock for the entire activation. Reserve
 before sending, so crashes can underuse the allowance but cannot refund it.

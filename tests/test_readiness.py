@@ -74,7 +74,7 @@ class Budgets(unittest.TestCase):
 class CycleLifecycle(unittest.IsolatedAsyncioTestCase):
     async def test_budget_write_failure_blocks_request_and_fails_workload(self):
         p = config()["browser"]
-        p.update(request_limit=1, interval_seconds=0)
+        p.update(operations=["browser_get"], http_endpoints=[], request_limit=1, interval_seconds=0)
         context = Mock(route=AsyncMock(), route_web_socket=AsyncMock(), close=AsyncMock())
         request = Mock(url=p["urls"][0], method="GET")
         request.is_navigation_request.return_value = True

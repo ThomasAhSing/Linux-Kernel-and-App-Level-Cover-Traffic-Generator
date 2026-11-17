@@ -134,7 +134,7 @@ PY
 sudo /opt/traffic-testbed/venv/bin/python /opt/traffic-testbed/testbed.py validate
 ```
 
-Each cycle retains existing navigation, per-page HTTP and cycle HTTP limits.
+Each cycle retains operation-attempt, per-page HTTP and cycle workload limits.
 After it finishes, the service closes Chromium, waits at least 60 seconds
 (default 900), and starts another bounded cycle if the weekday window is open.
 The persistent daily HTTP allowance counts approved requests before sending,

@@ -124,7 +124,7 @@ class BrowserRoutes(unittest.IsolatedAsyncioTestCase):
         process = Mock(new_context=AsyncMock(return_value=context), close=AsyncMock())
         launcher = Mock(launch=AsyncMock(return_value=process))
         p = config()["browser"]
-        p.update(request_limit=1, interval_seconds=0, max_requests=max_requests,
+        p.update(operations=["browser_get"], http_endpoints=[], request_limit=1, interval_seconds=0, max_requests=max_requests,
                  max_requests_per_page=per_page)
         with patch.object(t, "allowed", return_value=True):
             await t.browser(p, None, launcher)

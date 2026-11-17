@@ -17,6 +17,7 @@ import sys
 import time
 from urllib.parse import urlsplit
 from browser_budget import DailyBudget
+from network_operations import bounded_operation, choose_job, execute, validate_settings
 
 LOG = logging.getLogger("testbed")
 PROC = Path("/proc/net/pktgen")
@@ -97,14 +98,15 @@ def validate(c, component=None):
         if name == "browser" and "urls" in p:
             expected = {"enabled", "network_mode", "urls", "authorized_origins", "asset_origins",
                         "interval_seconds", "request_limit", "timeout_seconds", "max_requests", "max_requests_per_page"}
-        optional = {"repeat_during_window", "cycle_pause_seconds", "daily_request_limit"} if name == "browser" else set()
+        optional = {"repeat_during_window", "cycle_pause_seconds", "daily_request_limit",
+                    "operations", "http_endpoints"} if name == "browser" else set()
         if set(p) - optional != expected or type(p["enabled"]) is not bool:
             raise ValueError(f"{name}: invalid keys or enabled flag")
         if name == "browser":
             if type(p.get("repeat_during_window", False)) is not bool:
                 raise ValueError("repeat_during_window must be a boolean")
             number(p.get("cycle_pause_seconds", 900), 60, 3600, "cycle pause", True)
-            number(p.get("daily_request_limit", 1000), 1, 10000, "daily HTTP request limit", True)
+            number(p.get("daily_request_limit", 1000), 1, 10000, "daily workload budget", True)
             b = browser_settings(p)
             if b["network_mode"] not in ("lab", "external"):
                 raise ValueError("network_mode must be lab or external")
@@ -112,7 +114,7 @@ def validate(c, component=None):
             number(p["interval_seconds"], 5 if external else 1, 3600, "interval")
             number(p["request_limit"], 1, 10000, "request limit", True)
             number(p["timeout_seconds"], 1, 30, "timeout")
-            number(b["max_requests"], 1, 1000, "total HTTP request budget", True)
+            number(b["max_requests"], 1, 1000, "total workload budget", True)
             number(b["max_requests_per_page"], 1, 100, "per-page HTTP request budget", True)
             if not isinstance(b["urls"], list) or not b["urls"] or len(b["urls"]) > 50:
                 raise ValueError("configure between 1 and 50 website URLs")
@@ -128,6 +130,7 @@ def validate(c, component=None):
                 if not external and url not in ("http://10.203.0.2:8000/", "http://10.203.0.2:8000/page-two",
                                                 "https://10.203.0.2:8443/", "https://10.203.0.2:8443/page-two"):
                     raise ValueError("lab mode only permits the isolated test pages")
+            validate_settings(b, origin)
             if "urls" in p:
                 continue
             if not isinstance(p["pages"], list) or not p["pages"] or any(
@@ -331,13 +334,13 @@ async def browser(p, deadline, launcher=None, budget=None):
             elif budget_error is not None:
                 reason = "daily budget persistence failure"
             elif sent >= p["max_requests"]:
-                reason = "cycle HTTP budget"
+                reason = "cycle workload budget"
             elif page_requests >= p["max_requests_per_page"]:
                 reason = "page HTTP budget"
             elif budget is not None:
                 try:
                     if not budget.reserve():
-                        reason = "daily HTTP budget"
+                        reason = "daily workload budget"
                 except Exception as exc:
                     budget_error = exc
                     reason = "daily budget persistence failure"
@@ -372,22 +375,41 @@ async def browser(p, deadline, launcher=None, budget=None):
                and budget_error is None and (budget is None or budget.available())):
             page_requests = 0
             started = time.monotonic()
-            target_url = urls[count % len(urls)]
+            operation, target_url, endpoint = choose_job(p)
             try:
-                response = await navigation(page, target_url, p["timeout_seconds"], deadline)
-                if not allowed(deadline):
-                    break
-                if response is None or not response.ok:
-                    raise RuntimeError(f"HTTP failure: {getattr(response, 'status', None)}")
-                LOG.info("browser request success status=%s url=%s", response.status, target_url)
+                if operation == "browser_get":
+                    response = await navigation(page, target_url, p["timeout_seconds"], deadline)
+                    if not allowed(deadline):
+                        break
+                    if response is None or not response.ok:
+                        raise RuntimeError(f"HTTP failure: {getattr(response, 'status', None)}")
+                    LOG.info("browser request success status=%s url=%s", response.status, target_url)
+                else:
+                    # One shared budget unit per explicit operation, including failed
+                    # attempts. Browser assets/redirects continue to cost one each.
+                    if budget is not None:
+                        try:
+                            reserved = budget.reserve()
+                        except Exception as exc:
+                            budget_error = exc
+                            raise RuntimeError("daily budget persistence failure") from exc
+                        if not reserved:
+                            break
+                    if not allowed(deadline):
+                        break
+                    sent += 1
+                    result = await bounded_operation(
+                        execute(operation, target_url, endpoint, p["timeout_seconds"]),
+                        p["timeout_seconds"], deadline, allowed)
+                    LOG.info("network operation=%s success url=%s result=%s", operation, target_url, result)
             except Exception as exc:
                 if not allowed(deadline):
-                    LOG.info("navigation ended during shutdown")
+                    LOG.info("workload operation ended during shutdown")
                     break
                 errors += 1
-                LOG.error("browser request failed: %s", exc)
+                LOG.error("workload operation=%s failed: %s", operation, exc)
             count += 1
-            LOG.info("browser count=%d errors=%d http_requests=%d blocked=%d elapsed_seconds=%.3f",
+            LOG.info("browser count=%d errors=%d budget_units=%d blocked=%d elapsed_seconds=%.3f",
                      count, errors, sent, blocked, time.monotonic()-started)
             while (allowed(deadline) and budget_error is None and (budget is None or budget.available())
                    and time.monotonic() - started < p["interval_seconds"]):
@@ -401,7 +423,7 @@ async def browser(p, deadline, launcher=None, budget=None):
                 await context.close()
         finally:
             await browser_process.close()
-            LOG.info("browser stopped requests=%d errors=%d http_requests=%d blocked=%d", count, errors, sent, blocked)
+            LOG.info("browser stopped requests=%d errors=%d budget_units=%d blocked=%d", count, errors, sent, blocked)
 
 
 async def supervised_browser(p, deadline):
@@ -422,7 +444,7 @@ async def supervised_browser(p, deadline):
         while allowed(None) and time.monotonic() < until:
             await asyncio.sleep(0.05)
     if not budget.available():
-        LOG.warning("daily browser HTTP budget exhausted; stopped until next local day")
+        LOG.warning("daily workload budget exhausted; stopped until next local day")
 
 
 def stop_signal(signum, frame):

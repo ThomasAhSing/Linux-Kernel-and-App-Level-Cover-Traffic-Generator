@@ -3,6 +3,20 @@
     "browser":  {
                     "enabled":  false,
                     "network_mode":  "external",
+                    "operations": ["browser_get", "icmp_ping", "dns", "https_get", "tcp_connect", "tls_connect"],
+                    "http_endpoints": [
+                        {
+                            "type": "https_post",
+                            "url": "https://postman-echo.com/post",
+                            "json": {"message": "traffic-testbed"}
+                        },
+                        {
+                            "type": "https_api",
+                            "url": "https://postman-echo.com/get?source=traffic-testbed",
+                            "method": "GET",
+                            "headers": {"Accept": "application/json"}
+                        }
+                    ],
                     "urls":  [
                                  "https://www.youtube.com/",
                                  "https://www.google.com/",
@@ -29,7 +43,8 @@
                                                "https://onedrive.live.com",
                                                "https://www.microsoft.com",
                                                "https://login.microsoftonline.com",
-                                               "https://login.live.com"
+                                               "https://login.live.com",
+                                               "https://postman-echo.com"
                                            ],
                     "asset_origins":  [
                                           "https://www.gstatic.com",
