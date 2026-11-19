@@ -105,6 +105,28 @@ sudo systemctl stop traffic-schedule.service
 sudo systemctl stop traffic-browser.service traffic-browser-lab.service traffic-pktgen.service
 ```
 
+To save a network capture for Wireshark, install `tcpdump` once:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y tcpdump
+```
+
+In a separate terminal on the VM, start this 60-second capture, then immediately
+run the workload command below in your original terminal:
+
+```bash
+mkdir -p "$HOME/traffic-captures"
+sudo timeout --signal=INT 60s tcpdump -i any -nn -s 0 -U -w - > "$HOME/traffic-captures/test-60s.pcap"
+```
+
+The capture includes all VM interfaces and stops automatically after 60 seconds.
+It saves to `$HOME/traffic-captures/test-60s.pcap`, a persistent directory in your
+home folder. The `>` replaces any existing file with that name and keeps the
+file owned by your user. Open the saved `.pcap` file in Wireshark (copy it to
+your desktop machine first if needed). Captures include other VM traffic too;
+HTTPS payloads remain encrypted.
+
 Run the application workload manually, then inspect its logs:
 
 ```bash
@@ -126,6 +148,22 @@ and status; they do not process the response body. Public endpoints can reject
 or rate-limit requests. Use logs to distinguish successful requests from attempts.
 
 ## 4. Run on the weekday schedule
+
+To capture the real scheduled run, start this command in a separate terminal
+on the VM before enabling the schedule. Use the `tcpdump` installation command
+above if needed:
+
+```bash
+mkdir -p "$HOME/traffic-captures"
+sudo tcpdump -i any -nn -s 0 -U -w - > "$HOME/traffic-captures/scheduled-run.pcap"
+```
+
+Leave it running while the workload runs, then press **Ctrl+C** in the capture
+terminal to stop and finish the file. Open
+`$HOME/traffic-captures/scheduled-run.pcap` in Wireshark. This file also stays in
+your home folder and replaces any existing capture with the same name each time
+you run the command. The capture continues until you stop it, including outside
+the workload's scheduled hours, so allow enough disk space for its duration.
 
 Check the VM's time and timezone; the schedule uses the **VM's local timezone**.
 Then enable the timer and reconcile the schedule immediately:
